@@ -40,16 +40,23 @@ local line_was_removed = function(linnr, hunk, all_diff_output)
   for matching_line_index, line in ipairs(all_diff_output) do
     local found_hunk = M.parse_possible_hunk_headers(line)
     if found_hunk ~= nil and vim.deep_equal(found_hunk, hunk) then
-      -- We found a matching hunk, now we need to iterate over the lines from the raw diff output
-      -- at that hunk until we reach the line we are looking for. When the indexes match we check
-      -- to see if that line is deleted or not.
-      for hunk_line_index = found_hunk.old_line, hunk.old_line + hunk.old_range, 1 do
-        local line_content = all_diff_output[matching_line_index + 1]
-        if hunk_line_index == linnr then
-          if string.match(line_content, "^%-") then
+      local old_line_nr = found_hunk.old_line
+      local i = 1
+      local line_content = all_diff_output[matching_line_index + i]
+      while line_content ~= nil and not line_content:match("^@@") do
+        if line_content:match("^%-") then
+          if old_line_nr == linnr then
             return true
           end
+          old_line_nr = old_line_nr + 1
+        elseif line_content:match("^%+") then
+          -- Added lines don't consume old-file line numbers
+        elseif not line_content:match("^\\") then
+          -- Context lines consume old-file line numbers
+          old_line_nr = old_line_nr + 1
         end
+        i = i + 1
+        line_content = all_diff_output[matching_line_index + i]
       end
     end
   end
@@ -64,25 +71,23 @@ local line_was_added = function(linnr, hunk, all_diff_output)
   for matching_line_index, line in ipairs(all_diff_output) do
     local found_hunk = M.parse_possible_hunk_headers(line)
     if found_hunk ~= nil and vim.deep_equal(found_hunk, hunk) then
-      -- Parse the lines from the hunk and return only the added lines
-      local hunk_lines = {}
+      local new_line_nr = found_hunk.new_line
       local i = 1
       local line_content = all_diff_output[matching_line_index + i]
-      while line_content ~= nil and line_content:sub(1, 2) ~= "@@" do
-        if string.match(line_content, "^%+") then
-          table.insert(hunk_lines, line_content)
+      while line_content ~= nil and not line_content:match("^@@") do
+        if line_content:match("^%+") then
+          if new_line_nr == linnr then
+            return true
+          end
+          new_line_nr = new_line_nr + 1
+        elseif line_content:match("^%-") then
+          -- Deleted lines don't consume new-file line numbers
+        elseif not line_content:match("^\\") then
+          -- Context lines consume new-file line numbers
+          new_line_nr = new_line_nr + 1
         end
         i = i + 1
         line_content = all_diff_output[matching_line_index + i]
-      end
-
-      -- We are only looking at added lines in the changed hunk to see if their index
-      -- matches the index of a line that was added
-      local starting_index = found_hunk.new_line - 1 -- The "+j" will add one
-      for j, _ in ipairs(hunk_lines) do
-        if (starting_index + j) == linnr then
-          return true
-        end
       end
     end
   end
@@ -91,8 +96,9 @@ end
 
 ---Parse git diff hunks.
 ---@param base_sha string Git base SHA of merge request.
+---@param head_sha string Git head SHA of merge request.
 ---@return HunksAndDiff
-local parse_hunks_and_diff = function(base_sha)
+local parse_hunks_and_diff = function(base_sha, head_sha)
   local hunks = {}
   local all_diff_output = {}
 
@@ -104,6 +110,7 @@ local parse_hunks_and_diff = function(base_sha)
     "--no-color",
     "--no-ext-diff",
     base_sha,
+    head_sha,
     "--",
     reviewer.get_current_file_oldpath(),
     reviewer.get_current_file_path(),
@@ -234,7 +241,7 @@ end
 ---@param new_sha_focused boolean
 ---@return string|nil
 function M.get_modification_type(old_line, new_line, new_sha_focused)
-  local hunk_and_diff_data = parse_hunks_and_diff(state.INFO.diff_refs.base_sha)
+  local hunk_and_diff_data = parse_hunks_and_diff(state.INFO.diff_refs.base_sha, state.INFO.diff_refs.head_sha)
   if hunk_and_diff_data.hunks == nil then
     return
   end
@@ -298,5 +305,9 @@ M.calculate_matching_line_new = function(old_sha, new_sha, file_path, old_file_p
   -- TODO: Possibly handle lines that are out of range in the new files
   return line_number + net_change + 1
 end
+
+-- Exposed for testing
+M._line_was_added = line_was_added
+M._line_was_removed = line_was_removed
 
 return M
